@@ -28,77 +28,166 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, LSTM, InputLayer
 
 #------------------------------------------------------------------------------
-# Load Data
+# Load & Prepare Data
 ## TO DO:
 # 1) Check if data has been saved before. 
 # If so, load the saved data
 # If not, save the data into a directory
+# 2) Handle NaN values
+# 3) Scale features and prepare sequences
+# 4) Split into train/test sets
 #------------------------------------------------------------------------------
-# DATA_SOURCE = "yahoo"
-COMPANY = 'CBA.AX'
 
-TRAIN_START = '2020-01-01'     # Start date to read
-TRAIN_END = '2023-08-01'       # End date to read
+import os
 
-# data = web.DataReader(COMPANY, DATA_SOURCE, TRAIN_START, TRAIN_END) # Read data using yahoo
+def load_data(company='CBA.AX',           # Stock ticker symbol (default: Commonwealth Bank of Australia)
+              start_date='2020-01-01',   # Start date for data collection in YYYY-MM-DD format
+              end_date='2023-08-01',     # End date for data collection in YYYY-MM-DD format
+              price_column='Close',      # Which price column to use for prediction (Close, Open, High, Low)
+              prediction_days=60,        # Number of previous days to use for predicting next day
+              split_by_date=True,        # True: split chronologically, False: split randomly
+              test_size=0.2,            # Proportion of data for testing (0.2 = 20%)
+              scale=True,               # Whether to normalize data to 0-1 range
+              save_locally=True,        # Whether to save/load data from local files
+              local_path='data',        # Directory to save/load data files
+              fill_na_method='ffill',   # Method to handle missing values (ffill/bfill)
+              feature_columns=['Close']):# List of columns to scale/normalize
 
+    # REQUIREMENT 1(d): LOCAL DATA STORAGE IMPLEMENTATION
+    # Create local directory if it doesn't exist and saving is enabled
+    if save_locally and not os.path.exists(local_path):
+        os.makedirs(local_path)
+        print(f"Created directory: {local_path}")
 
-import yfinance as yf
+    # Generate unique filename based on company and date range
+    # This prevents conflicts when downloading different stocks or date ranges
+    file_path = os.path.join(local_path, f"{company}_{start_date}_{end_date}.csv")
 
-# Get the data for the stock AAPL
-data = yf.download(COMPANY,TRAIN_START,TRAIN_END)
+    # SMART CACHING MECHANISM:
+    # Check if data already exists locally to avoid re-downloading
+    if save_locally and os.path.exists(file_path):
+        print(f"Loading existing data from: {file_path}")
+        # Parse dates when loading to maintain proper datetime index
+        data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+    else:
+        print(f"Downloading fresh data for {company} from {start_date} to {end_date}")
+        # Download stock data using yfinance (more reliable than pandas_datareader)
+        data = yf.download(company, start=start_date, end=end_date)
+        
+        # Save downloaded data for future use if enabled
+        if save_locally:
+            data.to_csv(file_path)
+            print(f"Data saved to: {file_path}")
 
-#------------------------------------------------------------------------------
-# Prepare Data
-## To do:
-# 1) Check if data has been prepared before. 
-# If so, load the saved data
-# If not, save the data into a directory
-# 2) Use a different price value eg. mid-point of Open & Close
-# 3) Change the Prediction days
-#------------------------------------------------------------------------------
-PRICE_VALUE = "Close"
+    # REQUIREMENT 1(b): NaN VALUE HANDLING
+    # Handle missing values using specified method
+    if fill_na_method == 'ffill':
+        # Forward fill: use previous valid value to fill gaps
+        data.fillna(method='ffill', inplace=True)
 
-scaler = MinMaxScaler(feature_range=(0, 1)) 
-# Note that, by default, feature_range=(0, 1). Thus, if you want a different 
-# feature_range (min,max) then you'll need to specify it here
-scaled_data = scaler.fit_transform(data[PRICE_VALUE].values.reshape(-1, 1)) 
-# Flatten and normalise the data
-# First, we reshape a 1D array(n) to 2D array(n,1)
-# We have to do that because sklearn.preprocessing.fit_transform()
-# requires a 2D array
-# Here n == len(scaled_data)
-# Then, we scale the whole array to the range (0,1)
-# The parameter -1 allows (np.)reshape to figure out the array size n automatically 
-# values.reshape(-1, 1) 
-# https://stackoverflow.com/questions/18691084/what-does-1-mean-in-numpy-reshape'
-# When reshaping an array, the new shape must contain the same number of elements 
-# as the old shape, meaning the products of the two shapes' dimensions must be equal. 
-# When using a -1, the dimension corresponding to the -1 will be the product of 
-# the dimensions of the original array divided by the product of the dimensions 
-# given to reshape so as to maintain the same number of elements.
+    elif fill_na_method == 'bfill':
+        # Backward fill: use next valid value to fill gaps
+        data.fillna(method='bfill', inplace=True)
 
-# Number of days to look back to base the prediction
-PREDICTION_DAYS = 60 # Original
+    # REQUIREMENT 1(e): FEATURE SCALING WITH SCALER STORAGE
+    # Dictionary to store fitted scalers for each feature column
+    # This is crucial for inverse transformation later
+    scalers = {}
+    
+    if scale:
+        for col in feature_columns:
+            # Create individual scaler for each feature column
+            # MinMaxScaler normalizes data to range [0,1]
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            
+            # Fit scaler to column data and transform it
+            # reshape(-1, 1) converts 1D array to 2D column vector (required by sklearn)
+            data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
+            
+            # Store fitted scaler for future inverse transformations
+            # This is essential for converting predictions back to original scale
+            scalers[col] = scaler
 
-# To store the training data
-x_train = []
-y_train = []
+    # LSTM SEQUENCE PREPARATION
+    # LSTM networks need sequences of data to learn temporal patterns
+    # We create sliding windows of 'prediction_days' length
+    x_data, y_data = [], []
+    price_data = data[price_column].values
+    
+    # Create sequences: each x contains 'prediction_days' of historical data
+    # corresponding y contains the next day's price to predict
+    for i in range(prediction_days, len(price_data)):
+        # x_data: sequence of 'prediction_days' previous prices
+        x_data.append(price_data[i-prediction_days:i])
+        # y_data: the price we want to predict (next day)
+        y_data.append(price_data[i])
+    
+    # Convert lists to numpy arrays for efficiency
+    x_data, y_data = np.array(x_data), np.array(y_data)
+    
+    # Reshape x_data for LSTM input format: (samples, time_steps, features)
+    # LSTM expects 3D input: (number of sequences, sequence length, number of features)
+    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], 1))
+    
 
-scaled_data = scaled_data[:,0] # Turn the 2D array back to a 1D array
-# Prepare the data
-for x in range(PREDICTION_DAYS, len(scaled_data)):
-    x_train.append(scaled_data[x-PREDICTION_DAYS:x])
-    y_train.append(scaled_data[x])
+    # REQUIREMENT 1(c): FLEXIBLE TRAIN/TEST SPLITTING
+    if split_by_date:
+        # CHRONOLOGICAL SPLIT (recommended for time series)
+        # This respects temporal order - train on earlier data, test on later data
+        
+        # Calculate split index based on test_size
+        if isinstance(test_size, float):
+            # If test_size is float (e.g., 0.2), treat as percentage
+            split_idx = int(len(x_data) * (1 - test_size))
+        else:
+            # If test_size is int, treat as absolute number of test samples
+            split_idx = len(x_data) - test_size
+            
+        # Split data chronologically
+        x_train, x_test = x_data[:split_idx], x_data[split_idx:]
+        y_train, y_test = y_data[:split_idx], y_data[split_idx:]
+        
+    else:
+        # RANDOM SPLIT
+        
+        # Create array of indices and shuffle them randomly
+        indices = np.arange(len(x_data))
+        np.random.shuffle(indices)
+        
+        # Calculate split point
+        if isinstance(test_size, float):
+            split_idx = int(len(x_data) * (1 - test_size))
+        else:
+            split_idx = len(x_data) - test_size
+            
+        # Split indices into train and test sets
+        train_idx, test_idx = indices[:split_idx], indices[split_idx:]
+        
+        # Use shuffled indices to create train/test sets
+        x_train, x_test = x_data[train_idx], x_data[test_idx]
+        y_train, y_test = y_data[train_idx], y_data[test_idx]
 
-# Convert them into an array
-x_train, y_train = np.array(x_train), np.array(y_train)
-# Now, x_train is a 2D array(p,q) where p = len(scaled_data) - PREDICTION_DAYS
-# and q = PREDICTION_DAYS; while y_train is a 1D array(p)
+    # RETURN ALL PROCESSED DATA AND METADATA
+    # data: original DataFrame with processed features
+    # x_train, y_train: training sequences and targets
+    # x_test, y_test: testing sequences and targets  
+    # scalers: dictionary of fitted scalers for inverse transformation
+    return data, x_train, y_train, x_test, y_test, scalers
 
-x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
-# We now reshape x_train into a 3D array(p, q, 1); Note that x_train 
-# is an array of p inputs with each input being a 2D array 
+COMPANY = 'CBA.AX'           # Commonwealth Bank of Australia stock
+TRAIN_START = '2020-01-01'   # Training data start date
+TRAIN_END = '2023-08-01'     # Training data end date
+PRICE_VALUE = 'Close'        # Use closing price for predictions
+PREDICTION_DAYS = 60         # Use 60 days of history to predict next day
+
+# Call the function with all the defined parameters
+data, x_train, y_train, x_test, y_test, scalers = load_data(
+    company=COMPANY,
+    start_date=TRAIN_START,
+    end_date=TRAIN_END,
+    price_column=PRICE_VALUE,
+    prediction_days=PREDICTION_DAYS
+)
 
 #------------------------------------------------------------------------------
 # Build the Model
