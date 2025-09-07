@@ -22,6 +22,9 @@ import pandas as pd
 import pandas_datareader as web
 import datetime as dt
 import tensorflow as tf
+import mplfinance as mpf
+import yfinance as yf
+import os
 
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
@@ -38,11 +41,9 @@ from tensorflow.keras.layers import Dense, Dropout, LSTM, InputLayer
 # 4) Split into train/test sets
 #------------------------------------------------------------------------------
 
-import os
-
 def load_data(company='CBA.AX',           # Stock ticker symbol (default: Commonwealth Bank of Australia)
-              start_date='2020-01-01',   # Start date for data collection in YYYY-MM-DD format
-              end_date='2023-08-01',     # End date for data collection in YYYY-MM-DD format
+              start_date='2021-01-01',   # Start date for data collection in YYYY-MM-DD format
+              end_date='2025-08-01',     # End date for data collection in YYYY-MM-DD format
               price_column='Close',      # Which price column to use for prediction (Close, Open, High, Low)
               prediction_days=60,        # Number of previous days to use for predicting next day
               split_by_date=True,        # True: split chronologically, False: split randomly
@@ -52,6 +53,7 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
               local_path='data',        # Directory to save/load data files
               fill_na_method='ffill',   # Method to handle missing values (ffill/bfill)
               feature_columns=['Close']):# List of columns to scale/normalize
+
 
     # REQUIREMENT 1(d): LOCAL DATA STORAGE IMPLEMENTATION
     # Create local directory if it doesn't exist and saving is enabled
@@ -174,18 +176,276 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
     # scalers: dictionary of fitted scalers for inverse transformation
     return data, x_train, y_train, x_test, y_test, scalers
 
+#------------------------------------------------------------------------------
+# Visualization Functions (Task 3 - Option C)
+# 1) Candlestick chart with n-day candles
+# 2) Boxplot chart for rolling windows
+#------------------------------------------------------------------------------
+
+def plot_candlestick_chart(
+    df,
+    n_days=1,
+    title="Stock Price Candlestick Chart",
+    style='charles',
+    volume=True,
+    save_path=None,
+    figsize=(12, 8)
+):
+    """
+    Display stock market financial data using candlestick chart with n-day candles.
+    
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Stock price DataFrame indexed by Date. Must contain columns:
+        'Open', 'High', 'Low', 'Close', and optionally 'Volume'.
+    
+    n_days : int, default=1
+        Number of trading days to aggregate into each candlestick.
+        - n_days=1: Daily candles (default)
+        - n_days=5: Weekly candles 
+        - n_days>1: Multi-day aggregated candles
+    
+    title : str, default="Stock Price Candlestick Chart"
+        Chart title to display.
+    
+    style : str, default='charles'
+        mplfinance style theme. Options include:
+        'charles', 'binance', 'blueskies', 'brasil', 'dark', 'default', etc.
+    
+    volume : bool, default=True
+        Whether to display volume subplot below price chart.
+    
+    save_path : str or None, default=None
+        If provided, saves the figure to this path (e.g., "figs/candlestick.png").
+    
+    figsize : tuple, default=(12, 8)
+        Figure size as (width, height) in inches.
+    
+    How n-day aggregation works
+    ---------------------------
+    When n_days > 1, the function groups consecutive trading days:
+    - Open: First day's opening price in the n-day period
+    - High: Highest price across all n days  
+    - Low: Lowest price across all n days
+    - Close: Last day's closing price in the n-day period
+    - Volume: Sum of volume across all n days
+    
+    Example: n_days=5 creates weekly candles where each candle represents
+    5 consecutive trading days aggregated as described above.
+    """
+    
+    # Input validation
+    required_columns = ['Open', 'High', 'Low', 'Close']
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"DataFrame must contain columns: {missing_cols}")
+    
+    if n_days < 1:
+        raise ValueError("n_days must be >= 1")
+    
+    # Make a copy to avoid modifying original data
+    data = df.copy()
+    
+    # Handle n-day aggregation if n_days > 1
+    if n_days > 1:
+        print(f"Aggregating data into {n_days}-day candles...")
+        
+        # Group data into n-day chunks
+        # We'll resample by grouping every n_days rows
+        grouped_data = []
+        
+        # Iterate through data in chunks of n_days
+        for i in range(0, len(data), n_days):
+            chunk = data.iloc[i:i+n_days]
+            if len(chunk) == 0:
+                continue
+                
+            # Aggregate the chunk according to OHLC rules
+            aggregated_row = {
+                'Open': chunk['Open'].iloc[0],        # First day's open
+                'High': chunk['High'].max(),          # Highest high
+                'Low': chunk['Low'].min(),            # Lowest low  
+                'Close': chunk['Close'].iloc[-1],     # Last day's close
+            }
+            
+            # Add volume if present
+            if 'Volume' in chunk.columns:
+                aggregated_row['Volume'] = chunk['Volume'].sum()  # Sum of volumes
+            
+            # Use the last date in the chunk as the index
+            aggregated_row['Date'] = chunk.index[-1]
+            grouped_data.append(aggregated_row)
+        
+        # Create new DataFrame from aggregated data
+        if grouped_data:
+            data = pd.DataFrame(grouped_data)
+            data.set_index('Date', inplace=True)
+            print(f"Aggregated from {len(df)} daily records to {len(data)} {n_days}-day candles")
+        else:
+            raise ValueError("Not enough data to create any n-day candles")
+    
+    # Configure plot parameters
+    plot_config = {
+        'type': 'candle',           # Candlestick chart type
+        'style': style,             # Visual style theme
+        'title': title,             # Chart title
+        'figsize': figsize,         # Figure dimensions
+        'volume': volume,           # Show/hide volume subplot
+    }
+    
+    # Additional styling options
+    market_colors = mpf.make_marketcolors(
+        up='green',         # Color for bullish (up) candles
+        down='red',         # Color for bearish (down) candles  
+        edge='inherit',     # Edge color inherits from up/down colors
+        wick={'up':'green', 'down':'red'},  # Wick colors
+        volume='in'         # Volume color matches candle color
+    )
+    
+    # Create custom style with our color scheme
+    custom_style = mpf.make_mpf_style(
+        marketcolors=market_colors,
+        gridstyle='-',      # Grid line style
+        y_on_right=True     # Y-axis labels on right side
+    )
+    
+    # Override style if using custom colors
+    if style == 'custom':
+        plot_config['style'] = custom_style
+    
+    # Handle save functionality
+    if save_path:
+        plot_config['savefig'] = {
+            'fname': save_path,
+            'dpi': 150,
+            'bbox_inches': 'tight'
+        }
+    
+    try:
+        # Create the candlestick plot
+        mpf.plot(data, **plot_config)
+        print(f"Candlestick chart created successfully with {n_days}-day candles")
+        
+    except Exception as e:
+        print(f"Error creating candlestick chart: {str(e)}")
+        raise
+
+def plot_boxplots_moving_window(
+    df,
+    price_column="Close",
+    window=20,
+    stride=1,
+    showfliers=False,
+    title="Rolling Window Boxplots",
+    save_path=None
+):
+    """
+    Display boxplots of a price column over rolling windows of 'window' trading days.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Price DataFrame indexed by Date. Must include `price_column`.
+
+    price_column : str, default='Close'
+        Which column to summarize (e.g., 'Close', 'Open', 'High', 'Low').
+
+    window : int, default=20
+        Number of consecutive trading days per box (moving window length).
+
+    stride : int, default=1
+        Step size between windows (e.g., stride=5 plots every 5th window to reduce clutter).
+
+    showfliers : bool, default=False
+        Whether to show outliers on the boxplots.
+
+    title : str
+        Chart title.
+
+    save_path : str or None
+        If provided, saves the figure to this path (e.g., "figs/boxplot_win20.png").
+
+    How it works
+    ------------
+    - For i from window to len(df), we take df[price_column][i-window:i] as one window.
+    - Slide forward by `stride` rows each time.
+    - Each window becomes one box in the boxplot, labeled by the window's end date.
+    """
+
+    if price_column not in df.columns:
+        raise ValueError(f"DataFrame must contain '{price_column}' column.")
+    if window < 1:
+        raise ValueError("window must be >= 1")
+    if stride < 1:
+        raise ValueError("stride must be >= 1")
+
+    prices = df[price_column].dropna()
+    if len(prices) < window:
+        raise ValueError("Not enough data to form one window.")
+
+    # Collect rolling windows and labels
+    data_windows = []
+    labels = []
+    idx = prices.index
+
+    # Build each rolling window by slicing the Series
+    for end in range(window, len(prices) + 1, stride):
+        start = end - window
+        w = prices.iloc[start:end].values
+        data_windows.append(w)
+        labels.append(idx[end - 1].strftime("%Y-%m-%d"))  # use end date as label
+
+    # Plot boxplots
+    plt.figure()
+    plt.boxplot(
+        data_windows,
+        showfliers=showfliers,   # whether to draw outliers
+        widths=0.6               # width of each box
+    )
+    plt.title(f"{title} (window={window}, stride={stride})")
+    plt.ylabel(price_column)
+
+    # Avoid clutter on the x-axis by showing ~10 evenly spaced labels
+    if len(labels) > 10:
+        step = max(1, len(labels) // 10)
+        xticks = range(1, len(labels) + 1, step)
+        xtick_labels = [labels[i - 1] for i in xticks]
+        plt.xticks(xticks, xtick_labels, rotation=45, ha="right")
+    else:
+        plt.xticks(range(1, len(labels) + 1), labels, rotation=45, ha="right")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+    plt.show()
+
+#------------------------------------------------------------------------------
+# Main execution
+#------------------------------------------------------------------------------
+
+# Define parameters for data loading
 COMPANY = 'CBA.AX'           # Commonwealth Bank of Australia stock
-TRAIN_START = '2020-01-01'   # Training data start date
-TRAIN_END = '2023-08-01'     # Training data end date
+TRAIN_START = '2021-01-01'   # Training data start date
+TRAIN_END = '2025-08-01'     # Training data end date
 PRICE_VALUE = 'Close'        # Use closing price for predictions
 PREDICTION_DAYS = 60         # Use 60 days of history to predict next day
 
-# Call the function with all the defined parameters
+# Load and prepare the data
 data, x_train, y_train, x_test, y_test, scalers = load_data(
     company=COMPANY,
     start_date=TRAIN_START,
     end_date=TRAIN_END,
     price_column=PRICE_VALUE,
+    prediction_days=PREDICTION_DAYS
+)
+
+# Load original (unscaled) data for visualization
+original_data, _, _, _, _, _ = load_data(
+    company=COMPANY,
+    start_date=TRAIN_START,
+    end_date=TRAIN_END,
+    scale=False,  # Don't scale for visualization
     prediction_days=PREDICTION_DAYS
 )
 
