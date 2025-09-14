@@ -28,7 +28,7 @@ import os
 
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, LSTM, InputLayer
+from tensorflow.keras.layers import Dense, Dropout, LSTM, InputLayer, GRU, SimpleRNN, Bidirectional
 
 #------------------------------------------------------------------------------
 # Load & Prepare Data
@@ -54,7 +54,6 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
               fill_na_method='ffill',   # Method to handle missing values (ffill/bfill)
               feature_columns=['Close']):# List of columns to scale/normalize
 
-
     # REQUIREMENT 1(d): LOCAL DATA STORAGE IMPLEMENTATION
     # Create local directory if it doesn't exist and saving is enabled
     if save_locally and not os.path.exists(local_path):
@@ -78,18 +77,19 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
         
         # Save downloaded data for future use if enabled
         if save_locally:
-            data.to_csv(file_path)
+            # FIX: Reset index to convert MultiIndex to proper columns before saving
+            data_to_save = data.reset_index()
+            data_to_save.to_csv(file_path, index=False)
             print(f"Data saved to: {file_path}")
 
-    # REQUIREMENT 1(b): NaN VALUE HANDLING
+    # REQUIREMENT 1(b): NaN VALUE HANDLING - FIXED DEPRECATION WARNING
     # Handle missing values using specified method
     if fill_na_method == 'ffill':
         # Forward fill: use previous valid value to fill gaps
-        data.fillna(method='ffill', inplace=True)
-
+        data.ffill(inplace=True)  # FIXED: Updated from deprecated fillna(method='ffill')
     elif fill_na_method == 'bfill':
         # Backward fill: use next valid value to fill gaps
-        data.fillna(method='bfill', inplace=True)
+        data.bfill(inplace=True)  # FIXED: Updated from deprecated fillna(method='bfill')
 
     # REQUIREMENT 1(e): FEATURE SCALING WITH SCALER STORAGE
     # Dictionary to store fitted scalers for each feature column
@@ -98,22 +98,29 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
     
     if scale:
         for col in feature_columns:
-            # Create individual scaler for each feature column
-            # MinMaxScaler normalizes data to range [0,1]
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            
-            # Fit scaler to column data and transform it
-            # reshape(-1, 1) converts 1D array to 2D column vector (required by sklearn)
-            data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
-            
-            # Store fitted scaler for future inverse transformations
-            # This is essential for converting predictions back to original scale
-            scalers[col] = scaler
+            if col in data.columns:  # ADDED: Safety check for column existence
+                # Create individual scaler for each feature column
+                # MinMaxScaler normalizes data to range [0,1]
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                
+                # Fit scaler to column data and transform it
+                # reshape(-1, 1) converts 1D array to 2D column vector (required by sklearn)
+                data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
+                
+                # Store fitted scaler for future inverse transformations
+                # This is essential for converting predictions back to original scale
+                scalers[col] = scaler
+            else:
+                print(f"Warning: Column '{col}' not found in data. Skipping scaling for this column.")
 
     # LSTM SEQUENCE PREPARATION
     # LSTM networks need sequences of data to learn temporal patterns
     # We create sliding windows of 'prediction_days' length
     x_data, y_data = [], []
+    
+    if price_column not in data.columns:
+        raise ValueError(f"Price column '{price_column}' not found in data. Available columns: {list(data.columns)}")
+    
     price_data = data[price_column].values
     
     # Create sequences: each x contains 'prediction_days' of historical data
@@ -130,7 +137,6 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
     # Reshape x_data for LSTM input format: (samples, time_steps, features)
     # LSTM expects 3D input: (number of sequences, sequence length, number of features)
     x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], 1))
-    
 
     # REQUIREMENT 1(c): FLEXIBLE TRAIN/TEST SPLITTING
     if split_by_date:
@@ -151,7 +157,6 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
         
     else:
         # RANDOM SPLIT
-        
         # Create array of indices and shuffle them randomly
         indices = np.arange(len(x_data))
         np.random.shuffle(indices)
@@ -457,77 +462,159 @@ original_data, _, _, _, _, _ = load_data(
 # If not, save the data into a directory
 # 2) Change the model to increase accuracy?
 #------------------------------------------------------------------------------
-model = Sequential() # Basic neural network
-# See: https://www.tensorflow.org/api_docs/python/tf/keras/Sequential
-# for some useful examples
 
-model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
-# This is our first hidden layer which also spcifies an input layer. 
-# That's why we specify the input shape for this layer; 
-# i.e. the format of each training example
-# The above would be equivalent to the following two lines of code:
-# model.add(InputLayer(input_shape=(x_train.shape[1], 1)))
-# model.add(LSTM(units=50, return_sequences=True))
-# For som eadvances explanation of return_sequences:
-# https://machinelearningmastery.com/return-sequences-and-return-states-for-lstms-in-keras/
-# https://www.dlology.com/blog/how-to-use-return_state-or-return_sequences-in-keras/
-# As explained there, for a stacked LSTM, you must set return_sequences=True 
-# when stacking LSTM layers so that the next LSTM layer has a 
-# three-dimensional sequence input. 
-
-# Finally, units specifies the number of nodes in this layer.
-# This is one of the parameters you want to play with to see what number
-# of units will give you better prediction quality (for your problem)
-
-model.add(Dropout(0.2))
-# The Dropout layer randomly sets input units to 0 with a frequency of 
-# rate (= 0.2 above) at each step during training time, which helps 
-# prevent overfitting (one of the major problems of ML). 
-
-model.add(LSTM(units=50, return_sequences=True))
-# More on Stacked LSTM:
-# https://machinelearningmastery.com/stacked-long-short-term-memory-networks/
-
-model.add(Dropout(0.2))
-model.add(LSTM(units=50))
-model.add(Dropout(0.2))
-
-model.add(Dense(units=1)) 
-# Prediction of the next closing value of the stock price
-
-# We compile the model by specify the parameters for the model
-# See lecture Week 6 (COS30018)
-model.compile(optimizer='adam', loss='mean_squared_error')
-# The optimizer and loss are two important parameters when building an 
-# ANN model. Choosing a different optimizer/loss can affect the prediction
-# quality significantly. You should try other settings to learn; e.g.
+# Simple function to create different model architectures
+def create_model(sequence_length, n_features, units=50, cell=LSTM, n_layers=3, 
+                dropout=0.2, loss="mean_squared_error", optimizer="adam", bidirectional=False):
+    """
+    Create a deep learning model for stock prediction.
     
-# optimizer='rmsprop'/'sgd'/'adadelta'/...
-# loss='mean_absolute_error'/'huber_loss'/'cosine_similarity'/...
+    This function creates different types of RNN models (LSTM, GRU, SimpleRNN) with
+    configurable architecture. Based on the example code you provided.
+    
+    Parameters:
+    -----------
+    sequence_length: int
+        Length of input sequences (e.g., 60 days)
+    n_features: int  
+        Number of features (e.g., 1 for just closing price)
+    units: int
+        Number of neurons in each layer (default: 50)
+    cell: keras layer
+        Type of RNN cell (LSTM, GRU, or SimpleRNN)
+    n_layers: int
+        Number of RNN layers (default: 3)
+    dropout: float
+        Dropout rate for regularization (default: 0.2)
+    loss: str
+        Loss function to use (default: "mean_squared_error")
+    optimizer: str
+        Optimizer to use (default: "adam")
+    bidirectional: bool
+        Whether to use bidirectional layers (default: False)
+        
+    Returns:
+    --------
+    model: Sequential
+        Compiled Keras model ready for training
+    """
+    
+    model = Sequential()
+    
+    # Add layers based on n_layers parameter
+    for i in range(n_layers):
+        if i == 0:
+            # First layer needs input shape specification
+            if bidirectional:
+                model.add(Bidirectional(cell(units, return_sequences=True), 
+                                      input_shape=(sequence_length, n_features)))
+            else:
+                model.add(cell(units, return_sequences=True, 
+                              input_shape=(sequence_length, n_features)))
+        elif i == n_layers - 1:
+            # Last RNN layer doesn't return sequences
+            if bidirectional:
+                model.add(Bidirectional(cell(units, return_sequences=False)))
+            else:
+                model.add(cell(units, return_sequences=False))
+        else:
+            # Hidden layers return sequences
+            if bidirectional:
+                model.add(Bidirectional(cell(units, return_sequences=True)))
+            else:
+                model.add(cell(units, return_sequences=True))
+        
+        # Add dropout after each RNN layer to prevent overfitting
+        model.add(Dropout(dropout))
+    
+    # Output layer - single neuron for price prediction
+    model.add(Dense(1, activation="linear"))
+    
+    # Compile the model
+    model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)
+    
+    return model
 
-# Now we are going to train this model with our training data 
-# (x_train, y_train)
+# Get the scaler for later use
+scaler = scalers['Close']
+
+# Create the model using our function (similar to original)
+print("Creating LSTM model...")
+model = create_model(
+    sequence_length=x_train.shape[1],  # 60 days
+    n_features=x_train.shape[2],       # 1 feature (Close price)
+    units=50,                          # 50 neurons per layer
+    cell=LSTM,                         # Use LSTM cells
+    n_layers=3,                        # 3 layers (like original)
+    dropout=0.2,                       # 20% dropout
+    optimizer="adam"                   # Adam optimizer
+)
+
+print("Model architecture:")
+model.summary()
+
+# This replaces the original model building code and gives the same result:
+# model = Sequential() # Basic neural network
+# model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+# model.add(Dropout(0.2))
+# model.add(LSTM(units=50, return_sequences=True))
+# model.add(Dropout(0.2))
+# model.add(LSTM(units=50))
+# model.add(Dropout(0.2))
+# model.add(Dense(units=1))
+# model.compile(optimizer='adam', loss='mean_squared_error')
+
+# Now we can experiment with different architectures easily:
+
+# Experiment 1: Try GRU instead of LSTM
+print("\nExperiment 1: Creating GRU model...")
+gru_model = create_model(
+    sequence_length=x_train.shape[1],
+    n_features=x_train.shape[2],
+    units=50,
+    cell=GRU,                          # Use GRU instead of LSTM
+    n_layers=3,
+    dropout=0.2,
+    optimizer="adam"
+)
+
+# Experiment 2: Try Bidirectional LSTM
+print("\nExperiment 2: Creating Bidirectional LSTM model...")
+bi_lstm_model = create_model(
+    sequence_length=x_train.shape[1],
+    n_features=x_train.shape[2],
+    units=50,
+    cell=LSTM,
+    n_layers=2,                        # Use fewer layers for bidirectional
+    dropout=0.2,
+    optimizer="adam",
+    bidirectional=True                 # Make it bidirectional
+)
+
+# Experiment 3: Try different hyperparameters
+print("\nExperiment 3: Creating deeper LSTM model...")
+deep_model = create_model(
+    sequence_length=x_train.shape[1],
+    n_features=x_train.shape[2],
+    units=100,                         # More neurons
+    cell=LSTM,
+    n_layers=4,                        # More layers
+    dropout=0.3,                       # More dropout
+    optimizer="rmsprop"                # Different optimizer
+)
+
+# Train the original model (keeping the same training as before)
+print("\nTraining the main LSTM model...")
 model.fit(x_train, y_train, epochs=25, batch_size=32)
-# Other parameters to consider: How many rounds(epochs) are we going to 
-# train our model? Typically, the more the better, but be careful about
-# overfitting!
-# What about batch_size? Well, again, please refer to 
-# Lecture Week 6 (COS30018): If you update your model for each and every 
-# input sample, then there are potentially 2 issues: 1. If you training 
-# data is very big (billions of input samples) then it will take VERY long;
-# 2. Each and every input can immediately makes changes to your model
-# (a souce of overfitting). Thus, we do this in batches: We'll look at
-# the aggreated errors/losses from a batch of, say, 32 input samples
-# and update our model based on this aggregated loss.
 
-# TO DO:
-# Save the model and reload it
-# Sometimes, it takes a lot of effort to train your model (again, look at
-# a training data with billions of input samples). Thus, after spending so 
-# much computing power to train your model, you may want to save it so that
-# in the future, when you want to make the prediction, you only need to load
-# your pre-trained model and run it on the new input for which the prediction
-# need to be made.
+# Optional: Train other models for comparison
+print("\nTraining GRU model...")
+gru_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0)
+
+print("\nTraining Bidirectional LSTM model...")
+bi_lstm_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0)
+
+print("\nAll models trained successfully!")
 
 #------------------------------------------------------------------------------
 # Test the model accuracy on existing data
@@ -583,6 +670,14 @@ x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
 
 predicted_prices = model.predict(x_test)
 predicted_prices = scaler.inverse_transform(predicted_prices)
+
+# Compare predictions from different models
+gru_predictions = gru_model.predict(x_test)
+gru_predictions = scaler.inverse_transform(gru_predictions)
+
+bi_predictions = bi_lstm_model.predict(x_test)
+bi_predictions = scaler.inverse_transform(bi_predictions)
+
 # Clearly, as we transform our data into the normalized range (0,1),
 # we now need to reverse this transformation 
 #------------------------------------------------------------------------------
@@ -593,26 +688,42 @@ predicted_prices = scaler.inverse_transform(predicted_prices)
 # 3) Show chart of next few days (predicted)
 #------------------------------------------------------------------------------
 
-plt.plot(actual_prices, color="black", label=f"Actual {COMPANY} Price")
-plt.plot(predicted_prices, color="green", label=f"Predicted {COMPANY} Price")
-plt.title(f"{COMPANY} Share Price")
+plt.figure(figsize=(12, 8))
+plt.plot(actual_prices, color="black", label=f"Actual {COMPANY} Price", linewidth=2)
+plt.plot(predicted_prices, color="green", label=f"LSTM Predicted {COMPANY} Price", linewidth=1.5)
+plt.plot(gru_predictions, color="blue", label=f"GRU Predicted {COMPANY} Price", linewidth=1.5)
+plt.plot(bi_predictions, color="red", label=f"Bi-LSTM Predicted {COMPANY} Price", linewidth=1.5)
+plt.title(f"{COMPANY} Share Price Prediction Comparison")
 plt.xlabel("Time")
 plt.ylabel(f"{COMPANY} Share Price")
 plt.legend()
+plt.grid(True, alpha=0.3)
 plt.show()
 
 #------------------------------------------------------------------------------
 # Predict next day
 #------------------------------------------------------------------------------
 
-
 real_data = [model_inputs[len(model_inputs) - PREDICTION_DAYS:, 0]]
 real_data = np.array(real_data)
 real_data = np.reshape(real_data, (real_data.shape[0], real_data.shape[1], 1))
 
+# Make predictions with all models
 prediction = model.predict(real_data)
 prediction = scaler.inverse_transform(prediction)
-print(f"Prediction: {prediction}")
+print(f"LSTM Prediction: {prediction[0][0]:.2f}")
+
+gru_prediction = gru_model.predict(real_data)
+gru_prediction = scaler.inverse_transform(gru_prediction)
+print(f"GRU Prediction: {gru_prediction[0][0]:.2f}")
+
+bi_prediction = bi_lstm_model.predict(real_data)
+bi_prediction = scaler.inverse_transform(bi_prediction)
+print(f"Bidirectional LSTM Prediction: {bi_prediction[0][0]:.2f}")
+
+# Calculate average prediction
+avg_prediction = (prediction[0][0] + gru_prediction[0][0] + bi_prediction[0][0]) / 3
+print(f"Average Prediction: {avg_prediction:.2f}")
 
 # A few concluding remarks here:
 # 1. The predictor is quite bad, especially if you look at the next day 
