@@ -68,12 +68,94 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
     # Check if data already exists locally to avoid re-downloading
     if save_locally and os.path.exists(file_path):
         print(f"Loading existing data from: {file_path}")
-        # Parse dates when loading to maintain proper datetime index
-        data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+        try:
+            # Parse dates when loading to maintain proper datetime index
+            data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+            
+            # ENHANCED CORRUPTION DETECTION AND AUTO-FIX
+            # Check if data contains string values in numeric columns
+            numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            data_corrupted = False
+            
+            print(f"Checking data integrity...")
+            print(f"   Data shape: {data.shape}")
+            print(f"   Columns: {list(data.columns)}")
+            
+            for col in numeric_columns:
+                if col in data.columns:
+                    # Check for common corruption patterns
+                    sample_values = data[col].head(10).tolist()
+                    print(f"   Sample values in '{col}': {sample_values[:3]}...")
+                    
+                    # Check if any values are strings (like 'CBA.AX')
+                    try:
+                        # Try to convert to numeric - this will fail if strings are present
+                        pd.to_numeric(data[col].values, errors='raise')
+                    except (ValueError, TypeError) as e:
+                        print(f"WARNING: Corruption detected in column '{col}': {str(e)[:100]}...")
+                        data_corrupted = True
+                        break
+                    
+                    # Additional check: look for obvious string patterns
+                    if data[col].dtype == 'object':
+                        print(f"WARNING: Column '{col}' has object dtype - likely contains strings")
+                        data_corrupted = True
+                        break
+            
+            # If corruption detected, delete file and re-download
+            if data_corrupted:
+                print(f"Auto-fixing: Deleting corrupted file and downloading fresh data...")
+                os.remove(file_path)
+                # Re-download fresh data
+                print(f"Downloading fresh data from yfinance...")
+                data = yf.download(company, start=start_date, end=end_date)
+                
+                # FIX: Handle MultiIndex columns from yfinance
+                if isinstance(data.columns, pd.MultiIndex):
+                    print(f"Fixing MultiIndex columns...")
+                    # Flatten MultiIndex columns - keep only the first level (the actual column names)
+                    data.columns = [col[0] if isinstance(col, tuple) else col for col in data.columns]
+                    print(f"   Fixed columns: {list(data.columns)}")
+                
+                # Verify the fresh data
+                print(f"Fresh data downloaded - Shape: {data.shape}")
+                print(f"   Columns: {list(data.columns)}")
+                
+                if save_locally:
+                    data_to_save = data.reset_index()
+                    data_to_save.to_csv(file_path, index=False)
+                    print(f"Fresh data saved to: {file_path}")
+            else:
+                print(f"Data loaded successfully - no corruption detected")
+                
+        except Exception as e:
+            print(f"ERROR: Error loading cached data: {str(e)[:100]}...")
+            print(f"Auto-fixing: Downloading fresh data...")
+            # If loading fails for any reason, download fresh data
+            data = yf.download(company, start=start_date, end=end_date)
+            
+            # FIX: Handle MultiIndex columns from yfinance
+            if isinstance(data.columns, pd.MultiIndex):
+                print(f"Fixing MultiIndex columns...")
+                # Flatten MultiIndex columns - keep only the first level (the actual column names)
+                data.columns = [col[0] if isinstance(col, tuple) else col for col in data.columns]
+                print(f"   Fixed columns: {list(data.columns)}")
+            
+            if save_locally:
+                data_to_save = data.reset_index()
+                data_to_save.to_csv(file_path, index=False)
+                print(f"Fresh data downloaded and saved to: {file_path}")
     else:
         print(f"Downloading fresh data for {company} from {start_date} to {end_date}")
         # Download stock data using yfinance (more reliable than pandas_datareader)
         data = yf.download(company, start=start_date, end=end_date)
+        
+        # FIX: Handle MultiIndex columns from yfinance
+        if isinstance(data.columns, pd.MultiIndex):
+            print(f"Fixing MultiIndex columns...")
+            # Flatten MultiIndex columns - keep only the first level (the actual column names)
+            data.columns = [col[0] if isinstance(col, tuple) else col for col in data.columns]
+            print(f"   Fixed columns: {list(data.columns)}")
         
         # Save downloaded data for future use if enabled
         if save_locally:
@@ -81,6 +163,34 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
             data_to_save = data.reset_index()
             data_to_save.to_csv(file_path, index=False)
             print(f"Data saved to: {file_path}")
+
+    # ADDITIONAL DATA VALIDATION AND CLEANING
+    # Remove any rows that still contain string values in numeric columns
+    numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    rows_before = len(data)
+    
+    for col in numeric_columns:
+        if col in data.columns:
+            try:
+                # Convert to numeric, replacing any remaining strings with NaN
+                # Ensure we're working with a Series by accessing the column properly
+                data[col] = pd.to_numeric(data[col].values, errors='coerce')
+            except Exception as e:
+                print(f"WARNING: Could not clean column '{col}': {e}")
+                # If there's still an issue, try to drop the problematic column
+                data = data.drop(columns=[col])
+                print(f"Dropped problematic column '{col}'")
+    
+    # Remove rows where all price columns are NaN
+    price_columns = ['Open', 'High', 'Low', 'Close']
+    available_price_cols = [col for col in price_columns if col in data.columns]
+    if available_price_cols:
+        data = data.dropna(subset=available_price_cols, how='all')
+    
+    rows_after = len(data)
+    if rows_before != rows_after:
+        print(f"🧹 Data cleaning: Removed {rows_before - rows_after} corrupted rows")
+        print(f"   Final dataset: {rows_after} valid rows")
 
     # REQUIREMENT 1(b): NaN VALUE HANDLING - FIXED DEPRECATION WARNING
     # Handle missing values using specified method
@@ -553,7 +663,6 @@ model = create_model(
 print("Model architecture:")
 model.summary()
 
-# This replaces the original model building code and gives the same result:
 # model = Sequential() # Basic neural network
 # model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
 # model.add(Dropout(0.2))
@@ -563,8 +672,6 @@ model.summary()
 # model.add(Dropout(0.2))
 # model.add(Dense(units=1))
 # model.compile(optimizer='adam', loss='mean_squared_error')
-
-# Now we can experiment with different architectures easily:
 
 # Experiment 1: Try GRU instead of LSTM
 print("\nExperiment 1: Creating GRU model...")
@@ -739,3 +846,378 @@ print(f"Average Prediction: {avg_prediction:.2f}")
 # the stock price:
 # https://github.com/jason887/Using-Deep-Learning-Neural-Networks-and-Candlestick-Chart-Representation-to-Predict-Stock-Market
 # Can you combine these different techniques for a better prediction??
+
+#------------------------------------------------------------------------------
+# Task 1, 2, and 3: Advanced Prediction Functions
+#------------------------------------------------------------------------------
+
+def create_multistep_sequences(data, price_column='Close', prediction_days=60, future_steps=5):
+    """
+    Task 1: Create sequences for multistep prediction (predict multiple days ahead).
+    
+    Parameters:
+    -----------
+    data: pd.DataFrame
+        Stock data with price columns
+    price_column: str
+        Column name to predict (default: 'Close')
+    prediction_days: int
+        Number of historical days to use as input (default: 60)
+    future_steps: int
+        Number of future days to predict (default: 5)
+        
+    Returns:
+    --------
+    x_data: np.array
+        Input sequences (samples, time_steps, features)
+    y_data: np.array
+        Target sequences (samples, future_steps)
+    """
+    
+    if price_column not in data.columns:
+        raise ValueError(f"Price column '{price_column}' not found in data")
+    
+    price_data = data[price_column].values
+    x_data, y_data = [], []
+    
+    # Create sequences: each x contains 'prediction_days' of historical data
+    # corresponding y contains the next 'future_steps' days of prices
+    for i in range(prediction_days, len(price_data) - future_steps + 1):
+        # Input: historical sequence
+        x_data.append(price_data[i-prediction_days:i])
+        # Output: next future_steps days
+        y_data.append(price_data[i:i+future_steps])
+    
+    # Convert to numpy arrays
+    x_data = np.array(x_data)
+    y_data = np.array(y_data)
+    
+    # Reshape x_data for LSTM: (samples, time_steps, features)
+    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], 1))
+    
+    return x_data, y_data
+
+def create_multivariate_sequences(data, feature_columns=['Open', 'High', 'Low', 'Close', 'Volume'], 
+                                target_column='Close', prediction_days=60):
+    """
+    Task 2: Create sequences for multivariate prediction (multiple input features).
+    
+    Parameters:
+    -----------
+    data: pd.DataFrame
+        Stock data with multiple feature columns
+    feature_columns: list
+        List of column names to use as input features
+    target_column: str
+        Column name to predict (default: 'Close')
+    prediction_days: int
+        Number of historical days to use as input (default: 60)
+        
+    Returns:
+    --------
+    x_data: np.array
+        Input sequences (samples, time_steps, n_features)
+    y_data: np.array
+        Target values (samples,)
+    scalers: dict
+        Dictionary of fitted scalers for each feature
+    """
+    
+    # Check if all required columns exist
+    missing_cols = [col for col in feature_columns if col not in data.columns]
+    if missing_cols:
+        raise ValueError(f"Missing columns: {missing_cols}")
+    
+    if target_column not in data.columns:
+        raise ValueError(f"Target column '{target_column}' not found in data")
+    
+    # Scale the features
+    scalers = {}
+    scaled_data = data.copy()
+    
+    for col in feature_columns:
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
+        scalers[col] = scaler
+    
+    # Create sequences with multiple features
+    x_data, y_data = [], []
+    
+    for i in range(prediction_days, len(scaled_data)):
+        # Input: multiple features for 'prediction_days' historical days
+        x_sequence = []
+        for j in range(i-prediction_days, i):
+            # Get all feature values for day j
+            day_features = [scaled_data[col].iloc[j] for col in feature_columns]
+            x_sequence.append(day_features)
+        
+        x_data.append(x_sequence)
+        # Output: target column value for day i (scaled)
+        y_data.append(scaled_data[target_column].iloc[i])
+    
+    # Convert to numpy arrays
+    x_data = np.array(x_data)
+    y_data = np.array(y_data)
+    
+    return x_data, y_data, scalers
+
+def create_multivariate_multistep_sequences(data, feature_columns=['Open', 'High', 'Low', 'Close', 'Volume'],
+                                           target_column='Close', prediction_days=60, future_steps=5):
+    """
+    Task 3: Create sequences for multivariate, multistep prediction.
+    
+    Parameters:
+    -----------
+    data: pd.DataFrame
+        Stock data with multiple feature columns
+    feature_columns: list
+        List of column names to use as input features
+    target_column: str
+        Column name to predict (default: 'Close')
+    prediction_days: int
+        Number of historical days to use as input (default: 60)
+    future_steps: int
+        Number of future days to predict (default: 5)
+        
+    Returns:
+    --------
+    x_data: np.array
+        Input sequences (samples, time_steps, n_features)
+    y_data: np.array
+        Target sequences (samples, future_steps)
+    scalers: dict
+        Dictionary of fitted scalers for each feature
+    """
+    
+    # Check if all required columns exist
+    missing_cols = [col for col in feature_columns if col not in data.columns]
+    if missing_cols:
+        raise ValueError(f"Missing columns: {missing_cols}")
+    
+    if target_column not in data.columns:
+        raise ValueError(f"Target column '{target_column}' not found in data")
+    
+    # Scale the features
+    scalers = {}
+    scaled_data = data.copy()
+    
+    for col in feature_columns:
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
+        scalers[col] = scaler
+    
+    # Create sequences with multiple features and multiple outputs
+    x_data, y_data = [], []
+    
+    for i in range(prediction_days, len(scaled_data) - future_steps + 1):
+        # Input: multiple features for 'prediction_days' historical days
+        x_sequence = []
+        for j in range(i-prediction_days, i):
+            # Get all feature values for day j
+            day_features = [scaled_data[col].iloc[j] for col in feature_columns]
+            x_sequence.append(day_features)
+        
+        x_data.append(x_sequence)
+        
+        # Output: target column values for next 'future_steps' days (scaled)
+        y_sequence = []
+        for k in range(i, i + future_steps):
+            y_sequence.append(scaled_data[target_column].iloc[k])
+        
+        y_data.append(y_sequence)
+    
+    # Convert to numpy arrays
+    x_data = np.array(x_data)
+    y_data = np.array(y_data)
+    
+    return x_data, y_data, scalers
+
+def create_multistep_model(sequence_length, n_features, future_steps, units=50):
+    """
+    Create model for multistep prediction.
+    
+    Parameters:
+    -----------
+    sequence_length: int
+        Length of input sequences
+    n_features: int
+        Number of input features
+    future_steps: int
+        Number of future steps to predict
+    units: int
+        Number of LSTM units
+        
+    Returns:
+    --------
+    model: Sequential
+        Compiled model for multistep prediction
+    """
+    
+    model = Sequential()
+    
+    # LSTM layers
+    model.add(LSTM(units=units, return_sequences=True, input_shape=(sequence_length, n_features)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units))
+    model.add(Dropout(0.2))
+    
+    # Output layer - predict multiple future steps
+    model.add(Dense(future_steps, activation="linear"))
+    
+    model.compile(loss="mean_squared_error", metrics=["mean_absolute_error"], optimizer="adam")
+    
+    return model
+
+def create_multivariate_model(sequence_length, n_features, units=50):
+    """
+    Create model for multivariate prediction.
+    
+    Parameters:
+    -----------
+    sequence_length: int
+        Length of input sequences
+    n_features: int
+        Number of input features
+    units: int
+        Number of LSTM units
+        
+    Returns:
+    --------
+    model: Sequential
+        Compiled model for multivariate prediction
+    """
+    
+    model = Sequential()
+    
+    # LSTM layers - can handle multiple input features
+    model.add(LSTM(units=units, return_sequences=True, input_shape=(sequence_length, n_features)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units))
+    model.add(Dropout(0.2))
+    
+    # Output layer - single prediction
+    model.add(Dense(1, activation="linear"))
+    
+    model.compile(loss="mean_squared_error", metrics=["mean_absolute_error"], optimizer="adam")
+    
+    return model
+
+def create_multivariate_multistep_model(sequence_length, n_features, future_steps, units=50):
+    """
+    Create model for multivariate, multistep prediction.
+    
+    Parameters:
+    -----------
+    sequence_length: int
+        Length of input sequences
+    n_features: int
+        Number of input features
+    future_steps: int
+        Number of future steps to predict
+    units: int
+        Number of LSTM units
+        
+    Returns:
+    --------
+    model: Sequential
+        Compiled model for multivariate, multistep prediction
+    """
+    
+    model = Sequential()
+    
+    # LSTM layers - handle multiple features
+    model.add(LSTM(units=units, return_sequences=True, input_shape=(sequence_length, n_features)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=units))
+    model.add(Dropout(0.2))
+    
+    # Output layer - predict multiple future steps
+    model.add(Dense(future_steps, activation="linear"))
+    
+    model.compile(loss="mean_squared_error", metrics=["mean_absolute_error"], optimizer="adam")
+    
+    return model
+
+#------------------------------------------------------------------------------
+# Test the new functions
+#------------------------------------------------------------------------------
+
+print("\n" + "="*60)
+print("TESTING NEW ADVANCED PREDICTION FUNCTIONS")
+print("="*60)
+
+# Test Task 1: Multistep Prediction
+print("\nTask 1: Testing Multistep Prediction (5 days ahead)")
+try:
+    x_multistep, y_multistep = create_multistep_sequences(data, future_steps=5)
+    print(f"SUCCESS: Multistep data created successfully!")
+    print(f"   Input shape: {x_multistep.shape}")
+    print(f"   Output shape: {y_multistep.shape}")
+    
+    # Create and test model
+    multistep_model = create_multistep_model(x_multistep.shape[1], x_multistep.shape[2], 5)
+    print(f"SUCCESS: Multistep model created successfully!")
+    print(f"   Model expects input: {multistep_model.input_shape}")
+    
+except Exception as e:
+    print(f"ERROR: Task 1 failed: {e}")
+
+# Test Task 2: Multivariate Prediction
+print("\nTask 2: Testing Multivariate Prediction (all features)")
+try:
+    # Check what columns we have
+    available_cols = list(data.columns)
+    feature_cols = [col for col in ['Open', 'High', 'Low', 'Close', 'Volume'] if col in available_cols]
+    print(f"   Available columns: {available_cols}")
+    print(f"   Using features: {feature_cols}")
+    
+    if len(feature_cols) >= 2:  # Need at least 2 features
+        x_multivar, y_multivar, scalers_multivar = create_multivariate_sequences(
+            data, feature_columns=feature_cols
+        )
+        print(f"SUCCESS: Multivariate data created successfully!")
+        print(f"   Input shape: {x_multivar.shape}")
+        print(f"   Output shape: {y_multivar.shape}")
+        print(f"   Features used: {len(feature_cols)}")
+        
+        # Create and test model
+        multivar_model = create_multivariate_model(x_multivar.shape[1], x_multivar.shape[2])
+        print(f"SUCCESS: Multivariate model created successfully!")
+    else:
+        print(f"WARNING: Not enough features available for multivariate prediction")
+        
+except Exception as e:
+    print(f"ERROR: Task 2 failed: {e}")
+
+# Test Task 3: Combined Multivariate + Multistep
+print("\nTask 3: Testing Combined Multivariate + Multistep Prediction")
+try:
+    if len(feature_cols) >= 2:
+        x_combined, y_combined, scalers_combined = create_multivariate_multistep_sequences(
+            data, feature_columns=feature_cols, future_steps=3
+        )
+        print(f"SUCCESS: Combined data created successfully!")
+        print(f"   Input shape: {x_combined.shape}")
+        print(f"   Output shape: {y_combined.shape}")
+        print(f"   Features: {len(feature_cols)}, Future steps: 3")
+        
+        # Create and test model
+        combined_model = create_multivariate_multistep_model(
+            x_combined.shape[1], x_combined.shape[2], 3
+        )
+        print(f"SUCCESS: Combined model created successfully!")
+    else:
+        print(f"WARNING: Not enough features for combined prediction")
+        
+except Exception as e:
+    print(f"ERROR: Task 3 failed: {e}")
+
+print("\n" + "="*60)
+print("ADVANCED FUNCTIONS INTEGRATION COMPLETE!")
+print("="*60)
