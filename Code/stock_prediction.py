@@ -17,6 +17,8 @@
 # pip install yfinance
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import pandas as pd
 import pandas_datareader as web
@@ -196,7 +198,7 @@ def load_data(company='CBA.AX',           # Stock ticker symbol (default: Common
     
     rows_after = len(data)
     if rows_before != rows_after:
-        print(f"🧹 Data cleaning: Removed {rows_before - rows_after} corrupted rows")
+        print(f"[CLEAN] Data cleaning: Removed {rows_before - rows_after} corrupted rows")
         print(f"   Final dataset: {rows_after} valid rows")
 
     # REQUIREMENT 1(b): NaN VALUE HANDLING - FIXED DEPRECATION WARNING
@@ -540,7 +542,7 @@ def plot_boxplots_moving_window(
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)
-    plt.show()
+    # plt.show()  # Commented out to allow non-interactive execution
 
 #------------------------------------------------------------------------------
 # Main execution
@@ -647,8 +649,16 @@ def create_model(sequence_length, n_features, units=50, cell=LSTM, n_layers=3,
     # Output layer - single neuron for price prediction
     model.add(Dense(1, activation="linear"))
     
-    # Compile the model
-    model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)
+    # Compile the model with gradient clipping to prevent NaN
+    # Gradient clipping prevents gradient explosion which causes NaN values
+    if optimizer == "adam":
+        opt = tf.keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
+    elif optimizer == "rmsprop":
+        opt = tf.keras.optimizers.RMSprop(learning_rate=0.001, clipnorm=1.0)
+    else:
+        opt = optimizer
+    
+    model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=opt)
     
     return model
 
@@ -719,18 +729,57 @@ deep_model = create_model(
 
 # This code will only run when the script is executed directly, not when imported
 if __name__ == "__main__":
-    # Train the original model (keeping the same training as before)
-    print("\nTraining the main LSTM model...")
-    model.fit(x_train, y_train, epochs=25, batch_size=32)
+    # VALIDATION: Check for NaN/Inf in training data before training
+    print("\n" + "="*60)
+    print("VALIDATING TRAINING DATA")
+    print("="*60)
+    print(f"x_train shape: {x_train.shape}")
+    print(f"y_train shape: {y_train.shape}")
+    print(f"x_train NaN count: {np.isnan(x_train).sum()}")
+    print(f"y_train NaN count: {np.isnan(y_train).sum()}")
+    print(f"x_train Inf count: {np.isinf(x_train).sum()}")
+    print(f"y_train Inf count: {np.isinf(y_train).sum()}")
+    print(f"x_train range: [{x_train.min():.6f}, {x_train.max():.6f}]")
+    print(f"y_train range: [{y_train.min():.6f}, {y_train.max():.6f}]")
+    
+    # Check if data is valid
+    if np.isnan(x_train).any() or np.isnan(y_train).any():
+        print("\n[ERROR] Training data contains NaN values! Cannot train models.")
+        print("This usually means there's an issue with data loading or scaling.")
+    elif np.isinf(x_train).any() or np.isinf(y_train).any():
+        print("\n[ERROR] Training data contains Inf values! Cannot train models.")
+    else:
+        print("\n[OK] Training data is valid - proceeding with model training")
+        
+        # Train the original model (keeping the same training as before)
+        print("\nTraining the main LSTM model...")
+        history = model.fit(x_train, y_train, epochs=25, batch_size=32, validation_split=0.1)
+        
+        # Check if training produced NaN
+        final_loss = history.history['loss'][-1]
+        if np.isnan(final_loss):
+            print("[ERROR] LSTM training resulted in NaN loss - model failed to train properly")
+        else:
+            print(f"[OK] LSTM final training loss: {final_loss:.6f}")
 
-    # Optional: Train other models for comparison
-    print("\nTraining GRU model...")
-    gru_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0)
+        # Optional: Train other models for comparison
+        print("\nTraining GRU model...")
+        gru_history = gru_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0, validation_split=0.1)
+        gru_final_loss = gru_history.history['loss'][-1]
+        if np.isnan(gru_final_loss):
+            print("[ERROR] GRU training resulted in NaN loss")
+        else:
+            print(f"[OK] GRU final training loss: {gru_final_loss:.6f}")
 
-    print("\nTraining Bidirectional LSTM model...")
-    bi_lstm_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0)
+        print("\nTraining Bidirectional LSTM model...")
+        bi_history = bi_lstm_model.fit(x_train, y_train, epochs=25, batch_size=32, verbose=0, validation_split=0.1)
+        bi_final_loss = bi_history.history['loss'][-1]
+        if np.isnan(bi_final_loss):
+            print("[ERROR] Bi-LSTM training resulted in NaN loss")
+        else:
+            print(f"[OK] Bi-LSTM final training loss: {bi_final_loss:.6f}")
 
-    print("\nAll models trained successfully!")
+        print("\nAll models trained successfully!")
 
     #------------------------------------------------------------------------------
     # Test the model accuracy on existing data
@@ -785,14 +834,20 @@ if __name__ == "__main__":
     # TO DO: Explain the above 5 lines
 
     predicted_prices = model.predict(x_test)
+    print(f"DEBUG: Raw LSTM predictions shape: {predicted_prices.shape}, sample: {predicted_prices[:3].flatten()}")
     predicted_prices = scaler.inverse_transform(predicted_prices)
+    print(f"DEBUG: Inverse transformed LSTM predictions sample: {predicted_prices[:3].flatten()}")
 
     # Compare predictions from different models
     gru_predictions = gru_model.predict(x_test)
+    print(f"DEBUG: Raw GRU predictions shape: {gru_predictions.shape}, sample: {gru_predictions[:3].flatten()}")
     gru_predictions = scaler.inverse_transform(gru_predictions)
+    print(f"DEBUG: Inverse transformed GRU predictions sample: {gru_predictions[:3].flatten()}")
 
     bi_predictions = bi_lstm_model.predict(x_test)
+    print(f"DEBUG: Raw Bi-LSTM predictions shape: {bi_predictions.shape}, sample: {bi_predictions[:3].flatten()}")
     bi_predictions = scaler.inverse_transform(bi_predictions)
+    print(f"DEBUG: Inverse transformed Bi-LSTM predictions sample: {bi_predictions[:3].flatten()}")
 
     # Clearly, as we transform our data into the normalized range (0,1),
     # we now need to reverse this transformation 
@@ -812,15 +867,15 @@ if __name__ == "__main__":
 
     # Check if predictions are reasonable
     if predicted_prices.max() < 1:
-    print("⚠️  LSTM predictions seem too small, checking raw values...")
+        print("[WARNING] LSTM predictions seem too small, checking raw values...")
     print(f"   Raw LSTM predictions: {predicted_prices[:5].flatten()}")
     
     if gru_predictions.max() < 1:
-    print("⚠️  GRU predictions seem too small, checking raw values...")
+        print("[WARNING] GRU predictions seem too small, checking raw values...")
     print(f"   Raw GRU predictions: {gru_predictions[:5].flatten()}")
     
     if bi_predictions.max() < 1:
-    print("⚠️  Bi-LSTM predictions seem too small, checking raw values...")
+        print("[WARNING] Bi-LSTM predictions seem too small, checking raw values...")
     print(f"   Raw Bi-LSTM predictions: {bi_predictions[:5].flatten()}")
 
     plt.figure(figsize=(12, 8))
@@ -839,9 +894,15 @@ if __name__ == "__main__":
 
     # Set y-axis limits to ensure all lines are visible
     all_values = np.concatenate([actual_prices.flatten(), predicted_prices.flatten(), gru_predictions.flatten(), bi_predictions.flatten()])
-    plt.ylim(all_values.min() * 0.95, all_values.max() * 1.05)
+    # Filter out NaN values before setting limits
+    all_values_clean = all_values[~np.isnan(all_values)]
+    if len(all_values_clean) > 0:
+        plt.ylim(all_values_clean.min() * 0.95, all_values_clean.max() * 1.05)
+    else:
+        print("[WARNING] All prediction values are NaN, using default plot limits")
 
-    plt.show()
+    # plt.show()  # Commented out to allow non-interactive execution
+    plt.close()  # Close the figure to free memory
 
     #------------------------------------------------------------------------------
     # Predict next day
@@ -1263,8 +1324,8 @@ print("ADVANCED FUNCTIONS INTEGRATION COMPLETE!")
 print("="*60)
 
 #------------------------------------------------------------------------------
-# Task 5: Ensemble Methods (v0.5)
-# Combining ARIMA/SARIMA with Deep Learning Models
+# Task 6: Ensemble Methods (COMPLETE)
+# Combining ARIMA/SARIMA with Deep Learning Models (LSTM/GRU) and Random Forest
 #------------------------------------------------------------------------------
 
 def check_stationarity(timeseries):
@@ -1423,7 +1484,7 @@ def create_random_forest_model(data, target_col='Close', n_estimators=100, max_d
         
         if len(data_clean) < 50:
             print("Not enough data for Random Forest")
-            return None
+            return None, None
             
         X = data_clean[features]
         y = data_clean[target_col]
@@ -1549,7 +1610,7 @@ def create_ensemble_model(data, dl_model, arima_model=None, rf_model=None,
         
         if not predictions:
             print("No models available for ensemble")
-            return None
+            return None, None, None
         
         # Align prediction lengths
         min_length = min(len(pred) for pred in predictions)
@@ -1757,21 +1818,22 @@ def plot_ensemble_results(data, predictions_dict, model_names, save_path=None, a
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Ensemble results plot saved to: {save_path}")
     
-    plt.show()
+    # plt.show()  # Commented out to allow non-interactive execution
+    plt.close()  # Close the figure to free memory
 
 #------------------------------------------------------------------------------
-# Task 5: Ensemble Experiments
+# Task 6: Ensemble Experiments
 #------------------------------------------------------------------------------
 
 print("\n" + "="*80)
-print("TASK 5: ENSEMBLE METHODS - v0.5")
+print("TASK 6: ENSEMBLE METHODS - COMPLETE")
 print("="*80)
 
 # Load data for ensemble experiments
-print("\n📊 Loading data for ensemble experiments...")
+print("\n[DATA] Loading data for ensemble experiments...")
 try:
     # Load data with longer history for better ARIMA fitting
-    ensemble_data, x_train, y_train, x_test, y_test, scalers = load_data(
+    ensemble_data, x_train_ens, y_train_ens, x_test_ens, y_test_ens, scalers_ens = load_data(
         company='AAPL',
         start_date='2020-01-01',
         end_date='2024-01-01',
@@ -1779,12 +1841,12 @@ try:
         test_size=0.2
     )
     
-    print(f"✓ Loaded {len(ensemble_data)} days of data")
-    print(f"✓ Training samples: {len(x_train)}")
-    print(f"✓ Test samples: {len(x_test)}")
+    print(f"[OK] Loaded {len(ensemble_data)} days of data")
+    print(f"[OK] Training samples: {len(x_train_ens)}")
+    print(f"[OK] Test samples: {len(x_test_ens)}")
     
 except Exception as e:
-    print(f"❌ Error loading data: {e}")
+    print(f"[ERROR] Error loading data: {e}")
     ensemble_data = None
 
 if ensemble_data is not None:
@@ -1792,7 +1854,7 @@ if ensemble_data is not None:
     os.makedirs('ensemble_results', exist_ok=True)
     
     # 1. ARIMA Model
-    print("\n🔍 Fitting ARIMA model...")
+    print("\n[ARIMA] Fitting ARIMA model...")
     try:
         # Check stationarity
         print("Checking stationarity...")
@@ -1809,16 +1871,16 @@ if ensemble_data is not None:
         arima_model = fit_arima_model(stationary_data, order=(2, n_diff, 2))
         
     except Exception as e:
-        print(f"❌ ARIMA model failed: {e}")
+        print(f"[ERROR] ARIMA model failed: {e}")
         arima_model = None
     
     # 2. Deep Learning Models
-    print("\n🤖 Training Deep Learning models...")
+    print("\n[DL] Training Deep Learning models...")
     try:
         # LSTM Model
         lstm_model = create_model(
-            sequence_length=x_train.shape[1],
-            n_features=x_train.shape[2],
+            sequence_length=x_train_ens.shape[1],
+            n_features=x_train_ens.shape[2],
             units=50,
             cell=LSTM,
             n_layers=3,
@@ -1827,7 +1889,7 @@ if ensemble_data is not None:
         
         print("Training LSTM model...")
         lstm_history = lstm_model.fit(
-            x_train, y_train,
+            x_train_ens, y_train_ens,
             epochs=20,
             batch_size=32,
             validation_split=0.2,
@@ -1836,8 +1898,8 @@ if ensemble_data is not None:
         
         # GRU Model
         gru_model = create_model(
-            sequence_length=x_train.shape[1],
-            n_features=x_train.shape[2],
+            sequence_length=x_train_ens.shape[1],
+            n_features=x_train_ens.shape[2],
             units=50,
             cell=GRU,
             n_layers=3,
@@ -1846,36 +1908,36 @@ if ensemble_data is not None:
         
         print("Training GRU model...")
         gru_history = gru_model.fit(
-            x_train, y_train,
+            x_train_ens, y_train_ens,
             epochs=20,
             batch_size=32,
             validation_split=0.2,
             verbose=0
         )
         
-        print("✓ Deep Learning models trained successfully!")
+        print("[OK] Deep Learning models trained successfully!")
         
     except Exception as e:
-        print(f"❌ Deep Learning models failed: {e}")
+        print(f"[ERROR] Deep Learning models failed: {e}")
         lstm_model = None
         gru_model = None
     
     # 3. Random Forest Model
-    print("\n🌲 Training Random Forest model...")
+    print("\n[RF] Training Random Forest model...")
     try:
         rf_model, rf_features = create_random_forest_model(
             ensemble_data, 
             n_estimators=100, 
             max_depth=10
         )
-        print("✓ Random Forest model trained successfully!")
+        print("[OK] Random Forest model trained successfully!")
         
     except Exception as e:
-        print(f"❌ Random Forest model failed: {e}")
+        print(f"[ERROR] Random Forest model failed: {e}")
         rf_model = None
     
     # 4. Create Ensemble Models
-    print("\n🎯 Creating ensemble models...")
+    print("\n[ENSEMBLE] Creating ensemble models...")
     
     # Define actual_values for all ensembles
     actual_values = None
@@ -1889,13 +1951,13 @@ if ensemble_data is not None:
             arima_model=arima_model,
             ensemble_weights=[0.6, 0.4],  # Favor DL model
             method='weighted_average',
-            x_test=x_test,
-            scalers=scalers
+            x_test=x_test_ens,
+            scalers=scalers_ens
         )
         
         if ensemble1_pred is not None:
             # Evaluate performance - use test data actual values
-            actual_values = scalers['Close'].inverse_transform(y_test.reshape(-1, 1)).flatten()
+            actual_values = scalers_ens['Close'].inverse_transform(y_test_ens.reshape(-1, 1)).flatten()
             ensemble1_dict = dict(zip(ensemble1_names, ensemble1_components))
             ensemble1_dict['LSTM+ARIMA Ensemble'] = ensemble1_pred
             
@@ -1920,21 +1982,21 @@ if ensemble_data is not None:
             rf_model=(rf_model, rf_features),
             ensemble_weights=[0.4, 0.3, 0.3],  # Balanced weights
             method='weighted_average',
-            x_test=x_test,
-            scalers=scalers
+            x_test=x_test_ens,
+            scalers=scalers_ens
         )
         
         if ensemble2_pred is not None:
             # Add GRU predictions manually
-            gru_pred = gru_model.predict(x_test, verbose=0)
-            gru_pred = scalers['Close'].inverse_transform(gru_pred)
+            gru_pred = gru_model.predict(x_test_ens, verbose=0)
+            gru_pred = scalers_ens['Close'].inverse_transform(gru_pred)
             ensemble2_components.append(gru_pred.flatten())
             ensemble2_names.append('GRU')
             ensemble2_dict = dict(zip(ensemble2_names, ensemble2_components))
             ensemble2_dict['LSTM+GRU+RF Ensemble'] = ensemble2_pred
             
             # Get actual values for this ensemble - use test data actual values
-            ensemble2_actual_values = scalers['Close'].inverse_transform(y_test.reshape(-1, 1)).flatten()
+            ensemble2_actual_values = scalers_ens['Close'].inverse_transform(y_test_ens.reshape(-1, 1)).flatten()
             
             print("\nLSTM + GRU + Random Forest Ensemble Performance:")
             ensemble2_results = evaluate_ensemble_performance(
@@ -1959,21 +2021,21 @@ if ensemble_data is not None:
             rf_model=(rf_model, rf_features),
             ensemble_weights=[0.3, 0.2, 0.2, 0.3],  # Balanced weights
             method='weighted_average',
-            x_test=x_test,
-            scalers=scalers
+            x_test=x_test_ens,
+            scalers=scalers_ens
         )
         
         if ensemble3_pred is not None:
             # Add GRU predictions
-            gru_pred = gru_model.predict(x_test, verbose=0)
-            gru_pred = scalers['Close'].inverse_transform(gru_pred)
+            gru_pred = gru_model.predict(x_test_ens, verbose=0)
+            gru_pred = scalers_ens['Close'].inverse_transform(gru_pred)
             ensemble3_components.append(gru_pred.flatten())
             ensemble3_names.append('GRU')
             ensemble3_dict = dict(zip(ensemble3_names, ensemble3_components))
             ensemble3_dict['All Models Ensemble'] = ensemble3_pred
             
             # Get actual values for this ensemble - use test data actual values
-            ensemble3_actual_values = scalers['Close'].inverse_transform(y_test.reshape(-1, 1)).flatten()
+            ensemble3_actual_values = scalers_ens['Close'].inverse_transform(y_test_ens.reshape(-1, 1)).flatten()
             
             print("\nComprehensive Ensemble Performance:")
             ensemble3_results = evaluate_ensemble_performance(
@@ -1988,12 +2050,12 @@ if ensemble_data is not None:
             )
     
     print("\n" + "="*80)
-    print("✅ TASK 5: ENSEMBLE METHODS COMPLETE!")
+    print("[SUCCESS] TASK 6: ENSEMBLE METHODS COMPLETE!")
     print("="*80)
-    print("📊 Generated ensemble results and comparison plots")
-    print("📁 Results saved in 'ensemble_results/' directory")
-    print("🎯 Multiple ensemble combinations tested:")
-    print("   • LSTM + ARIMA")
-    print("   • LSTM + GRU + Random Forest") 
-    print("   • All Models Combined")
+    print("[RESULTS] Generated ensemble results and comparison plots")
+    print("[RESULTS] Results saved in 'ensemble_results/' directory")
+    print("[RESULTS] Multiple ensemble combinations tested:")
+    print("   - LSTM + ARIMA")
+    print("   - LSTM + GRU + Random Forest") 
+    print("   - All Models Combined")
     print("="*80)
